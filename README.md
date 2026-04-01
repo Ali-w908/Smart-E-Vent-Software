@@ -26,7 +26,7 @@ The firmware (`Ventilator_Firmware`) is strictly **non-blocking** and organized 
    - Monitors physical limits (driver ALM+, overpressure) and triggers alarms.
 3. **Hardware Abstraction Layer (HAL)**: Direct interaction with pins, the CS-D508 stepper driver, MPX5010DP flow sensor, and A3144 Hall Effect sensor.
 
-> **Read the SAD inside `Documentation/` for a complete breakdown of the states and system architecture.**
+> **Read the SAD (Software Architechture Document) inside `Documentation/` for a complete breakdown of the states and system architecture.**
 
 ## How to Compile & Upload
 
