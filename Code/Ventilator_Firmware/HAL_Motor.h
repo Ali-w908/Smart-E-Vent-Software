@@ -7,9 +7,9 @@
 
 #include <Arduino.h>
 
-// Direction constants
-#define MOTOR_DIR_COMPRESS   HIGH   // Toward Ambu bag (forward)
-#define MOTOR_DIR_RETRACT    LOW    // Away from Ambu bag (backward)
+// Direction constants (matched to mechanical assembly)
+#define MOTOR_DIR_COMPRESS   LOW    // Toward Ambu bag (forward)
+#define MOTOR_DIR_RETRACT    HIGH   // Away from Ambu bag (backward)
 
 void    HAL_Motor_Init();
 void    HAL_Motor_Enable();

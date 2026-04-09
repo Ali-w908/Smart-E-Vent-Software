@@ -198,13 +198,16 @@ static void _processSerialCommand() {
         // --- Tidal Volume (steps) ---
         case 'T': case 't': {
             int32_t val = _readSerialInt();
-            if (val >= 100 && val <= 5000) {
+            if (val >= 100 && val <= MECH_FULL_COMPRESS_STEPS) {
                 _tvSteps = val;
                 FSM_SetTidalVolumeSteps(_tvSteps);
                 Serial.print(F("[CMD] Tidal Vol = ")); Serial.print(_tvSteps);
-                Serial.println(F(" steps"));
+                Serial.print(F(" / ")); Serial.print(MECH_FULL_COMPRESS_STEPS);
+                Serial.println(F(" steps (max)"));
             } else {
-                Serial.println(F("[ERR] TV must be 100-5000. Usage: T1200"));
+                Serial.print(F("[ERR] TV must be 100-"));
+                Serial.print(MECH_FULL_COMPRESS_STEPS);
+                Serial.println(F(". Usage: T800"));
             }
             break;
         }

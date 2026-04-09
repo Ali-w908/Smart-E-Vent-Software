@@ -34,6 +34,14 @@
 #define MOTOR_PULSES_PER_REV    800   // CS-D508 DIP: OFF,ON,ON,ON
 
 // =============================================================
+// MECHANICAL CALIBRATION (measured empirically)
+// Full Ambu bag compression = 1.25 motor turns = 450 degrees.
+// 1.25 rev × 800 pulses/rev = 1000 pulses for full compression.
+// =============================================================
+#define MECH_FULL_COMPRESS_TURNS    1.25f
+#define MECH_FULL_COMPRESS_STEPS    ((int32_t)(MECH_FULL_COMPRESS_TURNS * MOTOR_PULSES_PER_REV))  // 1000
+
+// =============================================================
 // HAL TIME WRAPPERS
 // =============================================================
 uint32_t HAL_GetMillis();

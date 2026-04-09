@@ -19,7 +19,9 @@
 // =============================================================
 #define DEFAULT_BPM                 15
 #define DEFAULT_IE_RATIO            2.0f    // 1:2
-#define DEFAULT_TIDAL_STEPS         1600    // ~2 full revolutions at 800 pulses/rev
+// Full Ambu compression = MECH_FULL_COMPRESS_STEPS (1000).
+// Default tidal = 80 % of full compression → 800 steps.
+#define DEFAULT_TIDAL_STEPS         (int32_t)(MECH_FULL_COMPRESS_STEPS * 0.80f)  // 800
 #define DEFAULT_TARGET_PIP_KPA      2.5f    // ~25 cmH2O
 #define CALIBRATE_RETRACT_STEPS     400     // Steps back from max to Home
 #define CALIBRATE_TIMEOUT_MS        30000   // 30 s max for calibration
@@ -284,7 +286,8 @@ void FSM_SetIERatio(float ratio) {
 }
 
 void FSM_SetTidalVolumeSteps(int32_t steps) {
-    _settings.tidalVolumeSteps = steps;
+    // Clamp to physical limits: minimum useful stroke → full Ambu compression
+    _settings.tidalVolumeSteps = constrain(steps, 100, MECH_FULL_COMPRESS_STEPS);
 }
 
 void FSM_SetTargetPIP(float kpa) {
