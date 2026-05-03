@@ -35,11 +35,11 @@
 
 // =============================================================
 // MECHANICAL CALIBRATION (measured empirically)
-// Full Ambu bag compression = 1.25 motor turns = 450 degrees.
-// 1.25 rev × 800 pulses/rev = 1000 pulses for full compression.
+// Calibrated: update MECH_FULL_COMPRESS_STEPS when mechanism changes.
+// Current: 1100 steps at 800 pulses/rev = 1.375 turns.
 // =============================================================
-#define MECH_FULL_COMPRESS_TURNS    1.25f
-#define MECH_FULL_COMPRESS_STEPS    ((int32_t)(MECH_FULL_COMPRESS_TURNS * MOTOR_PULSES_PER_REV))  // 1000
+#define MECH_FULL_COMPRESS_STEPS    1100
+#define MECH_FULL_COMPRESS_TURNS    (MECH_FULL_COMPRESS_STEPS / (float)MOTOR_PULSES_PER_REV)
 
 // =============================================================
 // HAL TIME WRAPPERS

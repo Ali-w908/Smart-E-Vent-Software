@@ -2,6 +2,8 @@
 // Motor_Torque_Test.ino — Breath Sequence & Torque Test
 // Smart E-Ventilator — Pre-Integration Testing
 //
+// Pressure monitoring via dual BMP280 (differential: airway - ambient)
+//
 // This sketch delivers single, manually-triggered breaths
 // that match real ventilator waveforms (VCV and PCV).
 //
@@ -30,6 +32,12 @@
 // ===========================================================
 
 // =============================================================
+// LIBRARIES
+// =============================================================
+#include <Wire.h>
+#include <Adafruit_BMP280.h>
+
+// =============================================================
 // PIN DEFINITIONS
 // =============================================================
 #define PIN_MOTOR_PUL       2
@@ -50,11 +58,11 @@
 // =============================================================
 #define MOTOR_DIR_COMPRESS  LOW
 #define MOTOR_DIR_RETRACT   HIGH
-#define PULSES_PER_REV      800
-#define FULL_COMPRESS_STEPS 1100     // Calibrated: change ONLY this value
+#define PULSES_PER_REV      800      // 800 microstepping (DIP: SW1=OFF SW2=ON SW3=ON SW4=ON)
+#define FULL_COMPRESS_STEPS 1300     // Calibrated: change ONLY this value
 
 #define MIN_INTERVAL_US     100     // Fastest safe speed
-#define MAX_INTERVAL_US     1700    // Slowest safe speed
+#define MAX_INTERVAL_US     4000    // Slowest safe speed (very soft start/stop)
 #define CRUISE_INTERVAL_US  900     // Default cruise speed for breaths
 
 // Hall sensor
@@ -63,10 +71,11 @@
 // =============================================================
 // BREATH PROFILE CONSTANTS
 // =============================================================
-#define ACCEL_FRACTION      0.15f   // 15% of steps = acceleration
-#define CRUISE_FRACTION     0.70f   // 70% of steps = cruise
-#define DECEL_FRACTION      0.15f   // 15% of steps = deceleration
+#define ACCEL_FRACTION      0.30f   // 30% of steps = acceleration (longer S-Curve ease in)
+#define CRUISE_FRACTION     0.40f   // 40% of steps = cruise
+#define DECEL_FRACTION      0.30f   // 30% of steps = deceleration (longer S-Curve ease out)
 #define TELEMETRY_EVERY_N   40      // Print status every N steps
+#define SETTLE_STEPS        150     // Steps crossing the mechanical gap before bag contact
 
 // Default tidal volume = 80% of full compression
 #define DEFAULT_TIDAL_STEPS ((int32_t)(FULL_COMPRESS_STEPS * 0.80f))
@@ -105,6 +114,17 @@ static uint8_t  moveDirection   = MOTOR_DIR_COMPRESS;
 static uint32_t lastStepUs      = 0;
 
 // =============================================================
+// BMP280 PRESSURE SENSORS (I2C via Level Shifter)
+// =============================================================
+// Sensor 1 (Ambient): SDO→GND  = address 0x76
+// Sensor 2 (Airway):  SDO→3.3V = address 0x77
+Adafruit_BMP280 bmpAmbient;   // 0x76
+Adafruit_BMP280 bmpAirway;    // 0x77
+static bool bmpAmbientOk = false;
+static bool bmpAirwayOk  = false;
+static float lastPressure_kPa = 0.0f;  // Cached differential pressure
+
+// =============================================================
 // FLOW SENSOR STATE
 // =============================================================
 static unsigned long flowStartUs = 0;
@@ -112,10 +132,14 @@ static unsigned long flowSum = 0;
 static unsigned int flowCount = 0;
 static float zeroF = 56.0f;
 static float lastRaw = 56.0f;
+static float lastRawADC = 0.0f;     // For telemetry CSV output
+static float lastVoltage = 0.0f;     // For telemetry CSV output
 static float emaDerivative = 0.0f;
 static int quietSamples = 0;
 static float emaFlow = 0.0f;
 static float tidalVolume_mL = 0.0f;
+static float breathZeroF = 56.0f;    // Dynamic per-breath baseline (captured during settle)
+static bool  settled = false;         // Whether the settle phase is complete
 bool isMotorStepping = false;
 
 // =============================================================
@@ -185,7 +209,32 @@ void setup() {
     Serial.println(F(""));
     _printStatus();
 
-    // Auto-Zero Sensor
+    // --- Init I2C and BMP280 pressure sensors ---
+    Wire.begin();
+    Serial.print(F("[INIT] BMP280 Ambient (0x76): "));
+    bmpAmbientOk = bmpAmbient.begin(0x76);
+    Serial.println(bmpAmbientOk ? F("OK") : F("NOT FOUND"));
+
+    Serial.print(F("[INIT] BMP280 Airway  (0x77): "));
+    bmpAirwayOk = bmpAirway.begin(0x77);
+    Serial.println(bmpAirwayOk ? F("OK") : F("NOT FOUND"));
+
+    if (bmpAmbientOk) {
+        bmpAmbient.setSampling(Adafruit_BMP280::MODE_NORMAL,
+                               Adafruit_BMP280::SAMPLING_X2,
+                               Adafruit_BMP280::SAMPLING_X16,
+                               Adafruit_BMP280::FILTER_X4,
+                               Adafruit_BMP280::STANDBY_MS_63);
+    }
+    if (bmpAirwayOk) {
+        bmpAirway.setSampling(Adafruit_BMP280::MODE_NORMAL,
+                              Adafruit_BMP280::SAMPLING_X2,
+                              Adafruit_BMP280::SAMPLING_X16,
+                              Adafruit_BMP280::FILTER_X4,
+                              Adafruit_BMP280::STANDBY_MS_63);
+    }
+
+    // Auto-Zero Flow Sensor
     Serial.println(F("\n--- FLOW SENSOR WARM-UP (3s) ---"));
     for (int i = 0; i < 3000; i++) {
         analogRead(PIN_FLOW_SENSOR);
@@ -268,6 +317,8 @@ static void _accumulateFlowNonBlocking() {
 
     if (now - flowStartUs >= 40000UL) {
         float raw = (float)flowSum / flowCount;
+        lastRawADC = raw;                          // Store for telemetry
+        lastVoltage = raw * (5.0f / 1023.0f);      // Store for telemetry
         
         float dRaw = fabs(raw - lastRaw);
         lastRaw = raw;
@@ -293,12 +344,13 @@ static void _accumulateFlowNonBlocking() {
         // Since you installed the 47uF and 0.1uF capacitors, the hardware noise is gone!
         // We no longer need to mathematically add back phantom voltage.
         
-        float deltaADC = raw - zeroF;
+        // Use per-breath dynamic baseline during active breathing,
+        // or the static zero when idle.
+        float activeZero = (breathActive && settled) ? breathZeroF : zeroF;
+        float deltaADC = raw - activeZero;
         
-        // During compression, airflow is strictly positive. Clamp remaining noise to 0.
-        if (deltaADC < 0.0f) {
-            deltaADC = 0.0f;
-        }
+        // No negative clamp needed — the dynamic per-breath baseline
+        // absorbs EMI/vibration offset, and the dead zone handles residual noise.
 
         float flowRaw;
         // Reduced DEAD_ZONE to 1.0 to increase sensitivity to the gentle mechanical mechanism
@@ -321,7 +373,7 @@ static void _accumulateFlowNonBlocking() {
 
         emaFlow = 0.2f * flowRaw + 0.8f * emaFlow;
         
-        // Integrate volume (Ignore negative flow to reject motor ground bounce)
+        // Integrate volume (only positive flow — negative transients are sensor noise)
         if (emaFlow > 0.0f) {
             tidalVolume_mL += emaFlow * 0.666667f;
         }
@@ -329,6 +381,10 @@ static void _accumulateFlowNonBlocking() {
         flowSum = 0;
         flowCount = 0;
         flowStartUs = now;
+
+        // --- Read BMP280 pressure cooperatively (every 40ms, non-blocking) ---
+        // This keeps the I2C reads OUT of the tight motor step loop.
+        _readPressureKpa();
     }
 }
 
@@ -339,8 +395,14 @@ static void _delayWithFlow(uint32_t waitUs) {
     }
 }
 
-// Stub for PCV Airway Pressure (requires a second sensor, currently unavailable)
+// Read differential airway pressure from dual BMP280 sensors
 static float _readPressureKpa() {
+    if (bmpAmbientOk && bmpAirwayOk) {
+        float pAirway  = bmpAirway.readPressure();   // Pa
+        float pAmbient = bmpAmbient.readPressure();   // Pa
+        lastPressure_kPa = (pAirway - pAmbient) / 1000.0f;  // Convert Pa to kPa
+        return lastPressure_kPa;
+    }
     return 0.0f;
 }
 
@@ -363,14 +425,18 @@ static uint32_t _calcStepInterval(int32_t step, int32_t totalSteps) {
     float targetFreq = 1000000.0f / cruiseIntervalUs;
 
     if (step < accelEnd) {
-        // Accelerating: frequency (velocity) increases linearly from minFreq to targetFreq
+        // S-Curve Acceleration: cosine easing (smooth start AND smooth arrival at cruise)
+        //   frac goes 0→1 linearly over accel zone
+        //   cosine maps it to 0→1 with S-shape: slow start, fast middle, slow end
         float frac = (float)step / (float)accelEnd;
-        float currentFreq = minFreq + frac * (targetFreq - minFreq);
+        float sCurve = (1.0f - cos(frac * M_PI)) * 0.5f;  // 0→1 with S-shape
+        float currentFreq = minFreq + sCurve * (targetFreq - minFreq);
         return (uint32_t)(1000000.0f / currentFreq);
     } else if (step >= decelStart) {
-        // Decelerating: frequency (velocity) decreases linearly from targetFreq to minFreq
+        // S-Curve Deceleration: mirror of acceleration
         float frac = (float)(step - decelStart) / (float)(totalSteps - decelStart);
-        float currentFreq = targetFreq - frac * (targetFreq - minFreq);
+        float sCurve = (1.0f - cos(frac * M_PI)) * 0.5f;  // 0→1 with S-shape
+        float currentFreq = targetFreq - sCurve * (targetFreq - minFreq);
         return (uint32_t)(1000000.0f / currentFreq);
     } else {
         // Cruise
@@ -444,6 +510,7 @@ static void _executeVCVBreath() {
     if (steps <= 0) {
         Serial.println(F("[ERR] No room to compress!"));
         breathActive = false;
+        settled = false;
         return;
     }
 
@@ -458,6 +525,9 @@ static void _executeVCVBreath() {
 
     _enableMotor();
     tidalVolume_mL = 0.0f; // Reset volume accumulator
+    emaFlow = 0.0f;        // Reset EMA
+    breathZeroF = zeroF;   // Start with static zero, will be overridden after settling
+    settled = false;       // Mark settling phase as active
 
     // ===== PHASE 1: INHALE (compress with trapezoidal profile) =====
     Serial.println(F("[INH] Compressing..."));
@@ -468,15 +538,26 @@ static void _executeVCVBreath() {
     isMotorStepping = true;
 
     for (int32_t i = 0; i < steps; i++) {
-        if (_checkAbort()) { breathActive = false; isMotorStepping = false; return; }
+        if (_checkAbort()) { breathActive = false; isMotorStepping = false; settled = false; return; }
+
+        // --- Dynamic Per-Breath Baseline ---
+        // At the end of the settle zone (mechanical gap before bag contact),
+        // capture the current ADC average as the operational baseline.
+        if (i == SETTLE_STEPS && !settled) {
+            breathZeroF = lastRaw;      // Operational zero under motor conditions
+            emaFlow = 0.0f;             // Reset EMA to prevent accumulated drift
+            tidalVolume_mL = 0.0f;      // Reset volume (nothing real was measured yet)
+            settled = true;
+            Serial.print(F("  [SETTLE] breathZero=")); Serial.println(breathZeroF, 1);
+        }
 
         uint32_t interval = _calcStepInterval(i, steps);
         currentStepIntervalUs = interval;
         _fireStep();
         currentPosition++;
 
-        // Telemetry every N steps
-        if (i % TELEMETRY_EVERY_N == 0 || i == steps - 1) {
+        // Telemetry every N steps (suppress during settle to avoid transient spikes in CSV)
+        if ((i % TELEMETRY_EVERY_N == 0 || i == steps - 1) && settled) {
             const char* phase;
             int32_t accelEnd = (int32_t)(steps * ACCEL_FRACTION);
             int32_t decelStart = steps - (int32_t)(steps * DECEL_FRACTION);
@@ -489,7 +570,14 @@ static void _executeVCVBreath() {
             Serial.print(F("/")); Serial.print(steps);
             Serial.print(F("  Flow=")); Serial.print(emaFlow, 1);
             Serial.print(F(" L/min  Vol=")); Serial.print(tidalVolume_mL, 1);
-            Serial.println(F(" mL"));
+            Serial.print(F(" mL"));
+            // Use cached pressure (updated every 40ms in flow accumulator)
+            Serial.print(F("  Pressure=")); Serial.print(lastPressure_kPa, 3);
+            Serial.print(F(" kPa"));
+            // Raw ADC and voltage for CSV logging
+            Serial.print(F("  FlowADC=")); Serial.print((int)lastRawADC);
+            Serial.print(F("  FlowVolt=")); Serial.print(lastVoltage, 3);
+            Serial.println();
         }
 
         _delayWithFlow(interval);
@@ -510,14 +598,14 @@ static void _executeVCVBreath() {
 
         uint32_t holdStart = millis();
         while ((millis() - holdStart) < (uint32_t)holdMs) {
-            if (_checkAbort()) { breathActive = false; return; }
+            if (_checkAbort()) { breathActive = false; settled = false; return; }
             _delayWithFlow(50000); // 50ms cooperative wait
         }
     } else {
         Serial.println(F("[HOLD] No hold needed (motor time >= inhale time)"));
     }
 
-    // ===== PHASE 3: EXHALE (retract with trapezoidal profile) =====
+    // ===== PHASE 3: EXHALE (retract with S-Curve profile) =====
     Serial.println(F("[EXH] Retracting..."));
     digitalWrite(PIN_MOTOR_DIR, MOTOR_DIR_RETRACT);
     delay(5);
@@ -525,7 +613,7 @@ static void _executeVCVBreath() {
     uint32_t exhaleStartMs = millis();
     isMotorStepping = true;
     for (int32_t i = 0; i < steps; i++) {
-        if (_checkAbort()) { breathActive = false; isMotorStepping = false; return; }
+        if (_checkAbort()) { breathActive = false; isMotorStepping = false; settled = false; return; }
 
         uint32_t interval = _calcStepInterval(i, steps);
         currentStepIntervalUs = interval;
@@ -551,7 +639,7 @@ static void _executeVCVBreath() {
         Serial.print(pauseMs); Serial.println(F("ms"));
         uint32_t pauseStart = millis();
         while ((millis() - pauseStart) < (uint32_t)pauseMs) {
-            if (_checkAbort()) { breathActive = false; return; }
+            if (_checkAbort()) { breathActive = false; settled = false; return; }
             _delayWithFlow(50000); // 50ms cooperative wait
         }
     }
@@ -563,6 +651,7 @@ static void _executeVCVBreath() {
     Serial.println(F("Send C for next breath.\n"));
 
     breathActive = false;
+    settled = false;
 }
 
 // =============================================================
@@ -599,6 +688,7 @@ static void _executePCVBreath() {
     if (maxSteps <= 0) {
         Serial.println(F("[ERR] No room!"));
         breathActive = false;
+        settled = false;
         return;
     }
 
@@ -615,6 +705,9 @@ static void _executePCVBreath() {
 
     _enableMotor();
     tidalVolume_mL = 0.0f; // Reset volume accumulator
+    emaFlow = 0.0f;        // Reset EMA
+    breathZeroF = zeroF;   // Start with static zero
+    settled = false;       // Mark settling phase as active
 
     // ===== PHASE 1: INHALE — compress until PIP or max steps =====
     Serial.println(F("[INH] Compressing to target PIP..."));
@@ -626,14 +719,23 @@ static void _executePCVBreath() {
     bool     pipReached = false;
 
     for (int32_t i = 0; i < maxSteps; i++) {
-        if (_checkAbort()) { breathActive = false; return; }
+        if (_checkAbort()) { breathActive = false; settled = false; return; }
+
+        // --- Dynamic Per-Breath Baseline ---
+        if (i == SETTLE_STEPS && !settled) {
+            breathZeroF = lastRaw;
+            emaFlow = 0.0f;
+            tidalVolume_mL = 0.0f;
+            settled = true;
+            Serial.print(F("  [SETTLE] breathZero=")); Serial.println(breathZeroF, 1);
+        }
 
         if ((millis() - inhaleStartMs) >= inhaleMs) {
             Serial.println(F("  [TIME] Inhale time expired before PIP reached."));
             break;
         }
 
-        float pKpa = _readPressureKpa();
+        float pKpa = lastPressure_kPa;  // Use cached value from flow accumulator
         if (pKpa >= targetPIP_kPa && targetPIP_kPa > 0.0f) {
             pipReached = true;
             Serial.print(F("  [PIP] Target reached at P="));
@@ -650,11 +752,16 @@ static void _executePCVBreath() {
         currentPosition++;
         stepsDelivered++;
 
-        if (i % TELEMETRY_EVERY_N == 0) {
+        if (i % TELEMETRY_EVERY_N == 0 && settled) {
             Serial.print(F("  INH Stp=")); Serial.print(i + 1);
             Serial.print(F("  Flow=")); Serial.print(emaFlow, 1);
             Serial.print(F(" L/min  Vol=")); Serial.print(tidalVolume_mL, 1);
-            Serial.println(F(" mL"));
+            Serial.print(F(" mL"));
+            Serial.print(F("  Pressure=")); Serial.print(lastPressure_kPa, 3);
+            Serial.print(F(" kPa"));
+            Serial.print(F("  FlowADC=")); Serial.print((int)lastRawADC);
+            Serial.print(F("  FlowVolt=")); Serial.print(lastVoltage, 3);
+            Serial.println();
         }
 
         _delayWithFlow(interval);
@@ -675,7 +782,7 @@ static void _executePCVBreath() {
 
         uint32_t holdStart = millis();
         while ((millis() - holdStart) < (uint32_t)holdMs) {
-            if (_checkAbort()) { breathActive = false; return; }
+            if (_checkAbort()) { breathActive = false; settled = false; return; }
             _delayWithFlow(50000);
         }
     }
@@ -688,7 +795,7 @@ static void _executePCVBreath() {
 
     uint32_t exhaleStartMs = millis();
     for (int32_t i = 0; i < stepsDelivered; i++) {
-        if (_checkAbort()) { breathActive = false; return; }
+        if (_checkAbort()) { breathActive = false; settled = false; return; }
 
         uint32_t interval = _calcStepInterval(i, stepsDelivered);
         _fireStep();
@@ -712,7 +819,7 @@ static void _executePCVBreath() {
         Serial.println(F("ms"));
         uint32_t pauseStart = millis();
         while ((millis() - pauseStart) < (uint32_t)pauseMs) {
-            if (_checkAbort()) { breathActive = false; return; }
+            if (_checkAbort()) { breathActive = false; settled = false; return; }
             _delayWithFlow(50000);
         }
     }
@@ -725,6 +832,7 @@ static void _executePCVBreath() {
     Serial.println(F("Send C for next breath.\n"));
 
     breathActive = false;
+    settled = false;
 }
 
 // =============================================================
@@ -1044,8 +1152,14 @@ static void _printStatus() {
     Serial.print(F("  ALM+     : ")); Serial.println(almEnabled ? F("ON") : F("OFF"));
 
     float pNow = _readPressureKpa();
-    Serial.print(F("  Pressure : ")); Serial.print(pNow, 2);
-    Serial.println(F(" kPa"));
+    Serial.print(F("  Pressure : ")); Serial.print(pNow, 3);
+    Serial.print(F(" kPa  ("));
+    Serial.print(pNow * 10.1972f, 1);  // Convert kPa to cmH2O
+    Serial.println(F(" cmH2O)"));
+    Serial.print(F("  BMP280   : Amb="));
+    Serial.print(bmpAmbientOk ? F("OK") : F("N/A"));
+    Serial.print(F("  Air="));
+    Serial.println(bmpAirwayOk ? F("OK") : F("N/A"));
 
     int hallVal = analogRead(PIN_HALL_SENSOR);
     Serial.print(F("  Hall     : ")); Serial.print(hallVal);

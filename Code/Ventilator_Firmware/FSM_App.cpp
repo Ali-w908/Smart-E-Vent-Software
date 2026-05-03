@@ -21,7 +21,7 @@
 #define DEFAULT_IE_RATIO            2.0f    // 1:2
 // Full Ambu compression = MECH_FULL_COMPRESS_STEPS (1000).
 // Default tidal = 80 % of full compression → 800 steps.
-#define DEFAULT_TIDAL_STEPS         (int32_t)(MECH_FULL_COMPRESS_STEPS * 0.80f)  // 800
+#define DEFAULT_TIDAL_STEPS         (int32_t)(MECH_FULL_COMPRESS_STEPS * 0.80f)  // 80% of full
 #define DEFAULT_TARGET_PIP_KPA      2.5f    // ~25 cmH2O
 #define CALIBRATE_RETRACT_STEPS     400     // Steps back from max to Home
 #define CALIBRATE_TIMEOUT_MS        30000   // 30 s max for calibration

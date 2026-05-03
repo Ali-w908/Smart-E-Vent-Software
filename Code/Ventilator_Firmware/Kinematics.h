@@ -14,9 +14,9 @@
 #define KIN_DECEL_FRACTION          0.20f   // 20 % of move = deceleration
 // Remaining 60 % = cruise
 
-#define KIN_MIN_STEP_INTERVAL_US    150     // Fastest allowed (prevent stall)
-#define KIN_MAX_STEP_INTERVAL_US    5000    // Slowest allowed
-#define KIN_CALIBRATE_INTERVAL_US   1000    // Calibration speed (was 2000)
+#define KIN_MIN_STEP_INTERVAL_US    700     // Fastest allowed (tested limit)
+#define KIN_MAX_STEP_INTERVAL_US    1450    // Slowest allowed (stall boundary)
+#define KIN_CALIBRATE_INTERVAL_US   1200    // Calibration speed
 
 // =============================================================
 // MOVE PROFILE STRUCTURE

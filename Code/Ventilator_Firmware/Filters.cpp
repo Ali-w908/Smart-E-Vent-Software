@@ -76,7 +76,10 @@ float Filter_VoltageToKpa(float voltage) {
 // =============================================================
 
 // Pre-computed constant (see derivation above)
-const float VENTURI_K = 287.2f * 0.97f;   // ~278.6 L/min per sqrt(kPa)
+// Recalculated for D2 = 10mm (beta = 0.4545):
+//   K_final = 194.6 L/min per sqrt(kPa)
+//   Cd = 0.97 -> 188.8 L/min
+const float VENTURI_K = 188.8f;   // ~188.8 L/min per sqrt(kPa) @ 22mm/10mm
 
 float Filter_KpaToFlowLPM(float kpa) {
     if (kpa <= 0.0f) return 0.0f;
